@@ -1,64 +1,76 @@
-# Deadly Gas — fin de raid réaliste (SPT 4.0 / EFT 0.16.9)
+# Deadly Gas — realistic end-of-raid (SPT 4.0.x / EFT 0.16.9)
 
-Remplace le MIA arbitraire de fin de timer par un **gaz mortel** : quand le
-temps expire, la zone se remplit d'un gaz (teinte verte + brouillard), et la
-vie draine lentement — environ 3 minutes pour mourir à vie pleine (réglable).
-Le joueur peut encore tenter l'extraction : mieux vaut 2 minutes de course
-dans le gaz qu'un écran MIA à 2 mètres de l'extract.
+Replaces the arbitrary end-of-timer MIA with a **deadly gas**: when the raid
+timer expires, the zone slowly fills with gas (green haze + fog) and your
+health drains — about 3 minutes to die at full health (configurable). You can
+still run for the extract: extracting during the gas counts as a normal
+**Survived**. Dying in the gas is a normal death. No more MIA screen at
+2 meters from the extract.
 
-Mod **client** (BepInEx), indépendant de QuestManiac-Next.
+**Client-side** BepInEx plugin. Nothing to install server-side.
 
-## Installation
+## Install (users)
 
-1. `build.bat` (compile et copie la DLL dans `BepInEx\plugins\`).
-2. Lancer SPT normalement.
+Grab the release zip and extract it into your SPT folder (the one with
+`SPT.Launcher.exe`). The DLL lands in `BepInEx/plugins/MekkaDeadlyGas.dll`.
+
+## Build (from source)
+
+Requires the .NET SDK 9+. Then:
+
+```
+build.bat [path-to-SPT]     (default: D:\SPT4.0)
+```
+
+This compiles against the DLLs of YOUR SPT install (`BepInEx/core` and
+`EscapeFromTarkov_Data/Managed`) and copies the plugin into
+`BepInEx/plugins/`. No game assemblies are included in this repository.
 
 ## Configuration
 
-En jeu via **F12** (Configuration Manager) ou dans
-`BepInEx\config\com.mekka.deadlygas.cfg` :
+In game via **F12** (Configuration Manager) or in
+`BepInEx/config/com.mekka.deadlygas.cfg`:
 
-| Option | Défaut | Effet |
+| Setting | Default | Effect |
 |---|---|---|
-| Activer | oui | Coupe/rétablit tout le comportement |
-| Minutes avant la mort | 3 | Survie dans le gaz à vie pleine (calé sur le thorax) |
-| Montée du gaz (secondes) | 20 | Délai avant les premiers dégâts |
-| Effets visuels | oui | Teinte verte + brouillard |
-| Mode sonde | non | Diagnostic (voir plus bas) |
+| Enabled | on | Master switch |
+| Minutes before death | 3 | Survival time in the gas at full health (chest-based) |
+| Gas rise (seconds) | 20 | Grace period before damage starts |
+| Visual effects | on | Green tint + fog |
+| Tint intensity | 0.45 | Green overlay opacity (0.2 subtle → 0.7 pea soup) |
+| Fog density | 0.06 | Fog thickness at full ramp |
+| Probe mode | off | Diagnostic dumps for troubleshooting |
 
-## Comment ça marche
+## How it works
 
-Patch Harmony sur `EndByTimerScenario.Update` : tant que le timer tourne,
-comportement vanilla ; quand il expire, le MIA est bloqué et le gaz démarre
-(dégâts Poison répartis sur tout le corps, 1 tick/seconde). La mort dans le
-gaz est une mort normale (assurance, perte de stuff selon tes règles). Une
-extraction réussie reste une extraction réussie.
+Harmony prefix on `EndByTimerScenario.Update`. While the timer runs:
+vanilla. When it expires: the session is silently **extended by 24h** (so
+the game never fires the MIA path and extracts stay fully vanilla) and a
+`GasController` MonoBehaviour starts — visual ramp, then Poison-type damage
+distributed over all body parts, 1 tick/second, rate calibrated on the
+chest pool so "minutes before death" is accurate at full health.
 
-Tous les types du jeu sont résolus **par réflexion** : si une mise à jour
-d'EFT renomme quelque chose, le mod ne casse rien — il se désactive et le
-signale dans le log.
+Every game type is resolved **via reflection** with fallbacks (fields and
+properties, all `Singleton`1` candidates tried, etc.). If a future EFT
+update renames internals, the mod logs it and disables itself cleanly —
+it never breaks the raid.
 
-## Premier test (checklist)
+## Known quirks
 
-1. Raid Usine (timer court) — ou réduire la durée de raid pour tester vite.
-2. Laisser le timer expirer SANS s'extraire :
-   - à 0:00, pas d'écran MIA, l'écran verdit, le brouillard monte ;
-   - après ~20 s, la vie commence à baisser sur toutes les parties ;
-   - mort en ~3 min (vie pleine) → écran de mort normal.
-3. Refaire un raid, s'extraire PENDANT le gaz → extraction comptée Survived.
-4. Vérifier le log `BepInEx\LogOutput.log` : ligne
-   `[DeadlyGas] Patch fin-de-timer appliqué`.
+- After expiry the in-raid timer display shows ~24h instead of 00:00
+  (cosmetic — the gas is your real timer now).
+- AI Scavs are unaffected (gameplay choice: the map stays alive).
+- Works in PMC and player-Scav raids. Untested with Fika/coop.
 
-## Si ça ne marche pas
+## Troubleshooting
 
-Activer **Mode sonde** (F12), refaire un raid jusqu'à la fin du timer, puis
-envoyer `BepInEx\LogOutput.log`. Le log contient alors les noms réels des
-types/membres de ta version du jeu — de quoi ajuster le mod en une itération.
+Check `BepInEx/LogOutput.log` for `[DeadlyGas]` lines. If the patch fails
+to apply or resolution errors appear: enable **Probe mode** (F12), run one
+raid to timer end, and open an issue with your `LogOutput.log` attached —
+the probe dumps the real type/member names of your game version.
 
-## Limites connues (v0.1)
+## License
 
-- Pas de son de toux / respiration (phase 2).
-- Le masque à gaz ne protège pas encore (phase 2 — bonne idée cela dit).
-- Les bots ne sont pas affectés par le gaz (les Scavs sont immunisés, canon
-  discutable mais gameplay sain).
-- Non testé avec Fika/coop.
+MIT — see [LICENSE](LICENSE).
+
+---
