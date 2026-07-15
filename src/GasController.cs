@@ -8,8 +8,10 @@ namespace DeadlyGas
     /// <summary>
     /// Le gaz : montée (grace period), teinte verte + brouillard, puis dégâts
     /// périodiques répartis sur tout le corps via ActiveHealthController.
-    /// Le rythme est calé sur le thorax (85 PV) pour que "Minutes avant la
-    /// mort" soit vrai à vie pleine. La mort résultante est une mort normale.
+    /// Le rythme est calé sur la TÊTE (35 PV) : c'est la partie vitale la plus
+    /// fragile, donc la première à tomber — c'est elle qui fixe le vrai temps
+    /// de survie ("Minutes avant la mort" est exact à vie pleine).
+    /// La mort résultante est une mort normale.
     /// </summary>
     public class GasController : MonoBehaviour
     {
@@ -27,6 +29,13 @@ namespace DeadlyGas
         private object[] _bodyParts;
         private object _damageInfo;
 
+        // Réflexion masque à gaz (slot FaceCover, résolu une fois puis mis en cache)
+        private object _faceCoverSlot;
+        private bool _maskBroken;
+        private int _maskResolveAttempts;
+        private string _lastMaskId = "";
+        private float _currentFactor = 1f;
+
         // Visuel
         private Texture2D _tint;
         private bool _fogSaved;
@@ -35,7 +44,9 @@ namespace DeadlyGas
         private float _prevFogDensity;
         private FogMode _prevFogMode;
 
-        private const float ChestHp = 85f;
+        // La tête (35 PV) est la partie vitale la plus fragile : elle meurt la
+        // première sous des dégâts uniformes, c'est donc elle qui cadence.
+        private const float HeadHp = 35f;
 
         public static void EnsureStarted()
         {
@@ -95,8 +106,10 @@ namespace DeadlyGas
                     return;
                 }
 
-                // PV/s calé pour tuer le thorax en MinutesToDie (hors grace).
-                var perSecond = ChestHp / Mathf.Max(30f, Plugin.MinutesToDie.Value * 60f);
+                // PV/s calé pour tuer la tête en MinutesToDie (hors grace),
+                // divisé par le facteur de protection si un masque est porté.
+                UpdateMaskFactor();
+                var perSecond = HeadHp / Mathf.Max(30f, Plugin.MinutesToDie.Value * 60f) / _currentFactor;
                 foreach (var part in _bodyParts)
                     _applyDamage.Invoke(_healthController, new[] { part, (object)perSecond, _damageInfo });
             }
@@ -166,6 +179,105 @@ namespace DeadlyGas
 
             Plugin.Log.LogInfo($"[DeadlyGas] Santé résolue : ApplyDamage({_bodyPartEnum.Name}, float, {diType.Name}), {_bodyParts.Length} parties du corps.");
             return true;
+        }
+
+        // ---------- Masque à gaz ----------
+
+        /// <summary>GameWorld.MainPlayer.Profile.Inventory.Equipment.GetSlot(FaceCover).
+        /// Résolu une seule fois par raid ; le slot est stable, seul son contenu change.
+        /// Fail-safe : en cas d'échec, le gaz agit à plein régime (jamais de raid cassé).</summary>
+        private bool ResolveFaceCoverSlot()
+        {
+            var gw = GetGameWorld();
+            var player = GetMember(gw, "MainPlayer");
+            var profile = GetMember(player, "Profile");
+            var inventory = GetMember(profile, "Inventory");
+            var equipment = GetMember(inventory, "Equipment");
+            if (equipment == null)
+            {
+                ProbeIfEnabled(inventory != null ? inventory.GetType() : (profile != null ? profile.GetType() : null));
+                return false;
+            }
+
+            // Voie normale : GetSlot(EquipmentSlot.FaceCover)
+            var getSlot = equipment.GetType()
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "GetSlot" && m.GetParameters().Length == 1
+                    && m.GetParameters()[0].ParameterType.IsEnum);
+            if (getSlot != null)
+            {
+                var faceCover = Enum.GetValues(getSlot.GetParameters()[0].ParameterType)
+                    .Cast<object>().FirstOrDefault(v => v.ToString() == "FaceCover");
+                if (faceCover != null)
+                    _faceCoverSlot = getSlot.Invoke(equipment, new[] { faceCover });
+            }
+
+            // Repli : parcourir Equipment.Slots et matcher l'ID/Nom "FaceCover".
+            if (_faceCoverSlot == null && GetMember(equipment, "Slots") is System.Collections.IEnumerable slots)
+            {
+                foreach (var s in slots)
+                {
+                    var id = GetMember(s, "ID") ?? GetMember(s, "Id") ?? GetMember(s, "Name");
+                    if (id != null && id.ToString() == "FaceCover") { _faceCoverSlot = s; break; }
+                }
+            }
+
+            if (_faceCoverSlot == null) { ProbeIfEnabled(equipment.GetType()); return false; }
+            Plugin.Log.LogInfo("[DeadlyGas] Slot FaceCover résolu — protection par masque opérationnelle.");
+            return true;
+        }
+
+        /// <summary>Appelé à chaque tick de dégâts (1/s) : lit l'item du slot visage
+        /// et met à jour le facteur de division des dégâts. Coût négligeable à 1 Hz.</summary>
+        private void UpdateMaskFactor()
+        {
+            _currentFactor = 1f;
+            if (!Plugin.MaskProtection.Value || _maskBroken) return;
+
+            try
+            {
+                if (_faceCoverSlot == null && !ResolveFaceCoverSlot())
+                {
+                    if (++_maskResolveAttempts >= 10)
+                    {
+                        Plugin.Log.LogWarning("[DeadlyGas] Slot FaceCover introuvable après 10 essais — protection par masque désactivée pour ce raid (activer Mode sonde et envoyer le log).");
+                        _maskBroken = true;
+                    }
+                    return;
+                }
+
+                var item = GetMember(_faceCoverSlot, "ContainedItem");
+                var id = item == null ? "" : (GetMember(item, "TemplateId") ?? "").ToString();
+
+                if (IdListContains(Plugin.GasMaskIds.Value, id))
+                    _currentFactor = Mathf.Max(1f, Plugin.GasMaskFactor.Value);
+                else if (IdListContains(Plugin.RespiratorIds.Value, id))
+                    _currentFactor = Mathf.Max(1f, Plugin.RespiratorFactor.Value);
+
+                if (id != _lastMaskId)
+                {
+                    _lastMaskId = id;
+                    if (_currentFactor > 1f)
+                        Plugin.Log.LogInfo($"[DeadlyGas] Protection respiratoire détectée ({id}) : dégâts divisés par {_currentFactor:0.##}.");
+                    else if (id.Length > 0)
+                        Plugin.Log.LogInfo($"[DeadlyGas] Couvre-visage porté ({id}) : aucune protection contre le gaz.");
+                    else
+                        Plugin.Log.LogInfo("[DeadlyGas] Visage découvert : le gaz agit à plein régime.");
+                }
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning($"[DeadlyGas] Détection masque en échec ({e.GetType().Name}: {e.Message}) — protection désactivée pour ce raid.");
+                _maskBroken = true;
+            }
+        }
+
+        private static bool IdListContains(string csv, string id)
+        {
+            if (string.IsNullOrEmpty(csv) || string.IsNullOrEmpty(id)) return false;
+            foreach (var raw in csv.Split(','))
+                if (raw.Trim().Equals(id, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         private void ProbeIfEnabled(Type t)
