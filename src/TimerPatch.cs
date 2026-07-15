@@ -193,36 +193,61 @@ namespace DeadlyGas
             _resolveFailed = true;
         }
 
+        // ---- Caches réflexion ----------------------------------------------
+        // Le scan de tous les assemblies coûte TRÈS cher : il ne doit avoir
+        // lieu qu'UNE fois. Tout ce qui est appelé par frame passe par ici.
+        private static readonly System.Collections.Generic.Dictionary<string, Type> _typeCache = new();
+        private static readonly System.Collections.Generic.Dictionary<Type, PropertyInfo[]> _instPropsCache = new();
+        private static System.Collections.Generic.List<Type> _singletonDefs;
+
         internal static Type FindType(string name)
         {
-            return AppDomain.CurrentDomain.GetAssemblies()
+            if (_typeCache.TryGetValue(name, out var cached)) return cached;
+            var found = AppDomain.CurrentDomain.GetAssemblies()
                 .Where(a => !a.IsDynamic)
                 .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
                 .FirstOrDefault(t => t.Name == name);
+            _typeCache[name] = found;   // on cache aussi les null : pas de re-scan
+            return found;
         }
 
         /// <summary>
-        /// Singleton&lt;T&gt;.Instance en essayant TOUS les types "Singleton`1"
-        /// (il y en a plusieurs dans le jeu, avec des contraintes différentes).
+        /// Singleton&lt;T&gt;.Instance. Les définitions génériques et les
+        /// PropertyInfo fermés sont résolus une seule fois puis mis en cache :
+        /// le coût par frame se réduit à 1-2 lectures de propriété statique.
         /// </summary>
         internal static object SingletonInstance(Type target)
         {
-            var candidates = AppDomain.CurrentDomain.GetAssemblies()
-                .Where(a => !a.IsDynamic)
-                .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
-                .Where(t => t.Name == "Singleton`1" && t.IsGenericTypeDefinition)
-                .OrderByDescending(t => t.FullName == "Comfort.Common.Singleton`1");
-
-            foreach (var def in candidates)
+            if (!_instPropsCache.TryGetValue(target, out var props))
             {
-                try
+                if (_singletonDefs == null)
                 {
-                    var prop = def.MakeGenericType(target)
-                        .GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
-                    var value = prop?.GetValue(null);
-                    if (value != null) return value;
+                    _singletonDefs = AppDomain.CurrentDomain.GetAssemblies()
+                        .Where(a => !a.IsDynamic)
+                        .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
+                        .Where(t => t.Name == "Singleton`1" && t.IsGenericTypeDefinition)
+                        .OrderByDescending(t => t.FullName == "Comfort.Common.Singleton`1")
+                        .ToList();
                 }
-                catch { /* contraintes incompatibles : suivant */ }
+                var list = new System.Collections.Generic.List<PropertyInfo>();
+                foreach (var def in _singletonDefs)
+                {
+                    try
+                    {
+                        var p = def.MakeGenericType(target)
+                            .GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+                        if (p != null) list.Add(p);
+                    }
+                    catch { /* contraintes incompatibles : suivant */ }
+                }
+                props = list.ToArray();
+                _instPropsCache[target] = props;
+            }
+
+            foreach (var p in props)
+            {
+                var value = p.GetValue(null);
+                if (value != null) return value;
             }
             return null;
         }

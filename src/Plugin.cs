@@ -5,7 +5,7 @@ using HarmonyLib;
 
 namespace DeadlyGas
 {
-    [BepInPlugin("com.mekka.deadlygas", "Deadly Gas", "0.2.0")]
+    [BepInPlugin("com.mekka.deadlygas", "Deadly Gas", "0.2.1")]
     public class Plugin : BaseUnityPlugin
     {
         public static ManualLogSource Log;
